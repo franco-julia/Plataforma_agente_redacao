@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Plataforma de Redação</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 20px auto; }
+    h1 { text-align: center; }
+    textarea { width: 100%; min-height: 150px; }
+    input, button { padding: 8px; margin-top: 6px; }
+    .card { border: 1px solid #dddddd00; padding: 16px; margin-top: 20px; border-radius: 8px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .col { flex: 1 1 300px; }
+    pre { background: #33aba3; padding: 10px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>Plataforma de Correção de Redações (demo)</h1>
+
+  <div class="card">
+    <h2>Correção por texto</h2>
+    <label>Tema (opcional):</label><br />
+    <input type="text" id="tema-texto" placeholder="Tema da redação" style="width:100%" />
+
+    <br /><br />
+    <label>Texto da redação:</label><br />
+    <textarea id="texto-redacao" placeholder="Cole aqui a redação do aluno"></textarea>
+
+    <br />
+    <button onclick="corrigirTexto()">Corrigir texto</button>
+
+    <div id="resultado-texto"></div>
+  </div>
+
+  <div class="card">
+    <h2>Correção por arquivo (PDF / imagem)</h2>
+    <label>Tema (opcional):</label><br />
+    <input type="text" id="tema-arquivo" placeholder="Tema da redação" style="width:100%" />
+
+    <br /><br />
+    <label>Arquivo:</label><br />
+    <input type="file" id="arquivo-redacao" accept=".pdf,image/*" />
+
+    <br />
+    <button onclick="corrigirArquivo()">Enviar e corrigir arquivo</button>
+
+    <div id="resultado-arquivo"></div>
+  </div>
+
+  <script>
+    async function corrigirTexto() {
+      const texto = document.getElementById("texto-redacao").value;
+      const tema = document.getElementById("tema-texto").value || null;
+      const resultadoDiv = document.getElementById("resultado-texto");
+      resultadoDiv.innerHTML = "<p>Processando...</p>";
+
+      try {
+        const resp = await fetch("/corrigir", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ texto, tema }),
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json();
+          resultadoDiv.innerHTML = "<p style='color:red'>Erro: " + (err.detail || resp.status) + "</p>";
+          return;
+        }
+
+        const data = await resp.json();
+        resultadoDiv.innerHTML = `
+          <h3>Texto corrigido</h3>
+          <pre>${data.texto_corrigido}</pre>
+
+          <h3>Avaliação original</h3>
+          <pre>${JSON.stringify(data.avaliacao_original, null, 2)}</pre>
+
+          <h3>Avaliação do texto corrigido</h3>
+          <pre>${JSON.stringify(data.avaliacao_texto_corrigido, null, 2)}</pre>
+
+          <h3>Comparativo</h3>
+          <pre>${JSON.stringify(data.comparativo, null, 2)}</pre>
+        `;
+      } catch (e) {
+        resultadoDiv.innerHTML = "<p style='color:red'>Erro inesperado: " + e + "</p>";
+      }
+    }
+
+    async function corrigirArquivo() {
+      const arquivoInput = document.getElementById("arquivo-redacao");
+      const tema = document.getElementById("tema-arquivo").value || null;
+      const resultadoDiv = document.getElementById("resultado-arquivo");
+      resultadoDiv.innerHTML = "<p>Processando...</p>";
+
+      if (!arquivoInput.files.length) {
+        resultadoDiv.innerHTML = "<p style='color:red'>Selecione um arquivo primeiro.</p>";
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("arquivo", arquivoInput.files[0]);
+      if (tema) formData.append("tema", tema);
+
+      try {
+        const resp = await fetch("/corrigir-arquivo", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json();
+          resultadoDiv.innerHTML = "<p style='color:red'>Erro: " + (err.detail || resp.status) + "</p>";
+          return;
+        }
+
+        const data = await resp.json();
+        resultadoDiv.innerHTML = `
+          <h3>Texto extraído via OCR</h3>
+          <pre>${data.texto_extraido}</pre>
+
+          <h3>Texto corrigido</h3>
+          <pre>${data.texto_corrigido}</pre>
+
+          <h3>Avaliação original</h3>
+          <pre>${JSON.stringify(data.avaliacao_original, null, 2)}</pre>
+
+          <h3>Avaliação do texto corrigido</h3>
+          <pre>${JSON.stringify(data.avaliacao_texto_corrigido, null, 2)}</pre>
+
+          <h3>Comparativo</h3>
+          <pre>${JSON.stringify(data.comparativo, null, 2)}</pre>
+        `;
+      } catch (e) {
+        resultadoDiv.innerHTML = "<p style='color:red'>Erro inesperado: " + e + "</p>";
+      }
+    }
+  </script>
+</body>
+</html>
