@@ -1,113 +1,98 @@
-import os, re, json, cv2
-import numpy as np
+import os
+import json
+from typing import Dict, Any, Optional
+
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai.errors import ClientError
-from dotenv import load_dotenv
-from fastapi import UploadFile
 
 load_dotenv()
 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("Defina GEMINI_API_KEY no arquivo .env ou nas variáveis de ambiente.")
+
 GEMINI_MODEL = "gemini-2.0-flash"
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-
-SYSTEM_INSTRUCTION = """
+#  ENEM
+SYSTEM_INSTRUCTION_ENEM = """
 Você é um corretor especialista em redações do ENEM.
-Avalie a redação de acordo com as 5 competências, dê notas de 0 a 200 e explique cada uma.
-Responda sempre em JSON. Ignore quaisquer distorções visuais, rasuras, sombras ou ruídos introduzidos por filtros.
-Reconstrua palavras provavelmente incompletas.
-Interprete letras manuscritas pela forma semântica mais provável.
+Avalie a redação de acordo com as 5 competências do ENEM (0 a 200 cada):
+
+Comp 1: domínio da norma padrão.
+Comp 2: compreensão da proposta e organização das ideias.
+Comp 3: seleção e organização de argumentos.
+Comp 4: coesão e coerência na articulação do texto.
+Comp 5: proposta de intervenção detalhada, respeitando direitos humanos.
+
+Regras:
+- Seja objetivo e técnico, mas em linguagem acessível ao estudante.
+- Pode citar trechos da redação quando necessário.
+- Sempre responda em JSON exatamente no formato solicitado.
 """
 
-import cv2
-import numpy as np
+def build_prompt_avaliacao(essay_text: str, tema: Optional[str] = None) -> str:
+    tema_str = f"TEMA: {tema}\n\n" if tema else ""
+    return f"""
+{tema_str}
+REDAÇÃO DO ALUNO:
+\"\"\"{essay_text}\"\"\"
 
-def preprocess_image_bytes(file_bytes: bytes) -> bytes:
+TAREFA:
+1. Atribua uma nota (0 a 200) para cada competência.
+2. Justifique cada nota brevemente, apontando pontos fortes e pontos a melhorar.
+3. Calcule a nota total (soma das 5 competências).
+4. Dê um comentário geral.
+5. Sugira 3 ações concretas para o aluno melhorar na próxima redação.
+
+RESPONDA OBRIGATORIAMENTE EM JSON COM O SEGUINTE FORMATO:
+
+{{
+  "competencias": {{
+    "comp1": {{"nota": 0, "justificativa": "..." }},
+    "comp2": {{"nota": 0, "justificativa": "..." }},
+    "comp3": {{"nota": 0, "justificativa": "..." }},
+    "comp4": {{"nota": 0, "justificativa": "..." }},
+    "comp5": {{"nota": 0, "justificativa": "..." }}
+  }},
+  "nota_total": 0,
+  "comentario_geral": "...",
+  "sugestoes_reescrita": ["...", "...", "..."]
+}}
+""".strip()
+
+def avaliar_redacao(essay_text: str, tema: Optional[str] = None) -> Dict[str, Any]:
     """
-    Pré-processamento suave adequado para OCR baseado em IA (Gemini):
-    - tons de cinza
-    - leve redução de ruído
-    - deskew leve (usando HoughLines)
-    - sem binarização forte
+    Avalia a redação em formato ENEM, retornando um JSON com notas e comentários.
     """
-    nparr = np.frombuffer(file_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        return file_bytes
+    prompt = build_prompt_avaliacao(essay_text, tema)
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    lines = cv2.HoughLines(edges, 1, np.pi / 180, 200)
-
-    angle = 0.0
-    if lines is not None:
-        angles = []
-        for line in lines[:20]:
-            rho, theta = line[0]
-            ang = (theta * 180.0 / np.pi) - 90.0
-            if -15 < ang < 15:
-                angles.append(ang)
-
-        if len(angles) > 0:
-            angle = sum(angles) / len(angles)
-
-            (h, w) = gray.shape[:2]
-            M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-            gray = cv2.warpAffine(
-                gray,
-                M,
-                (w, h),
-                flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_REPLICATE,
-            )
-
-    ok, encoded = cv2.imencode(".png", gray)
-    if not ok:
-        return file_bytes
-
-    return encoded.tobytes()
-
-def extrair_texto_de_arquivo(file_bytes: bytes, mime_type: str) -> str:
-    """
-    Recebe o conteúdo do arquivo em bytes (PDF/PNG/JPG) e
-    usa o Gemini para extrair APENAS o texto da redação.
-    """
-    ocr_instruction = (
-        "Extraia APENAS o texto da redação escrita em português do Brasil.\n\n"
-        "Regras:\n"
-        "- Ignore cabeçalho, nome do aluno, número de matrícula, códigos, "
-        "carimbos e qualquer texto fora dos parágrafos da redação.\n"
-        "- Preserve a ordem dos parágrafos e deixe uma linha em branco entre eles.\n"
-        "- Não corrija, não comente e não mude o nível de linguagem: apenas copie.\n"
-        "- Se alguma palavra estiver parcialmente ilegível, escolha a forma "
-        "mais provável em português, evitando sequências aleatórias de letras.\n"
-        "- Se houver linhas tortas ou desalinhadas, reconstrua a frase completa "
-        "no fluxo normal da leitura.\n"
-        "- Não inclua rascunhos, anotações laterais nem instruções da prova."
-    )
-
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
-            types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-            ocr_instruction,
-        ],
-        config = types.GenerateContentConfig(
-            system_instruction=(
-                "Você é um extrator de texto (OCR) especializado em redações "
-                "manuscritas do ENEM. Seu papel é transcrever com fidelidade, "
-                "ignorando elementos gráficos irrelevantes e ruídos visuais."
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION_ENEM,
+                response_mime_type="application/json",
             ),
-            response_mime_type="text/plain",
-        ),
-    )
+        )
+    except ClientError as e:
+        raise e
 
-    texto = (response.text or "").strip()
-    return texto
+    try:
+        data = json.loads(response.text)
+    except Exception:
+        data = {
+            "error": "Falha ao interpretar JSON de avaliação.",
+            "raw_response": response.text,
+        }
+
+    return data
+
+#  correção
+SYSTEM_INSTRUCTION_GRAM = "Você reescreve textos em português do Brasil na norma-padrão."
 
 def corrigir_gramatica_ptbr(texto: str) -> str:
     """
@@ -126,7 +111,7 @@ Reescreva o texto abaixo, corrigindo:
 
 Mantenha:
 - o sentido original do texto
-- a estrutura de parágrafos (com linha em branco entre eles)
+- a estrutura de parágrafos (linha em branco entre eles)
 - o nível de linguagem típico de redação do ENEM (formal e claro)
 
 NÃO explique, NÃO comente e NÃO faça lista.
@@ -136,114 +121,36 @@ TEXTO DO ALUNO:
 \"\"\"{texto}\"\"\"
 """.strip()
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction="Você reescreve textos em PT-BR na norma-padrão.",
-            response_mime_type="text/plain",
-        ),
-    )
-
-    return response.text.strip()
-
-def limpar_ruidos_ocr(texto: str) -> str:
-    """
-    Aplica uma limpeza leve em texto vindo de OCR:
-    - remove linhas quase vazias cheias de símbolos
-    - corrige espaços múltiplos
-    - elimina 'palavras' claramente não linguísticas
-    """
-
-    linhas = [linha.strip() for linha in texto.splitlines()]
-
-    linhas_limpa = []
-    for linha in linhas:
-        if len(linha) > 0:
-            letras = sum(c.isalpha() for c in linha)
-            simbolos = sum(not c.isalnum() and not c.isspace() for c in linha)
-            if letras == 0 and simbolos > 3:
-                continue
-
-        linhas_limpa.append(linha)
-
-    texto2 = "\n".join(linhas_limpa)
-
-    texto2 = re.sub(r"[ \t]+", " ", texto2)
-
-    def filtro_palavra(p: str) -> bool:
-        if len(p) >= 4:
-            if not re.search(r"[aeiouáéíóúâêôãõAEIOUÁÉÍÓÚÂÊÔÃÕ]", p):
-                return False
-        return True
-
-    paragrafos = []
-    for par in texto2.split("\n"):
-        palavras = par.split()
-        palavras_filtradas = [p for p in palavras if filtro_palavra(p)]
-        paragrafos.append(" ".join(palavras_filtradas))
-
-    texto_final = "\n".join(paragrafos).strip()
-
-    return texto_final
-
-def build_prompt(texto_redacao: str, tema: str | None = None):
-    tema_str = f"TEMA: {tema}\n\n" if tema else ""
-    return f"""
-{tema_str}
-REDAÇÃO DO ALUNO:
-\"\"\"{texto_redacao}\"\"\"
-
-TAREFA:
-Avalie nas 5 competências do ENEM.
-Gere JSON com o formato:
-
-{{
-  "competencias": {{
-    "comp1": {{"nota": 0, "justificativa": ""}},
-    "comp2": {{"nota": 0, "justificativa": ""}},
-    "comp3": {{"nota": 0, "justificativa": ""}},
-    "comp4": {{"nota": 0, "justificativa": ""}},
-    "comp5": {{"nota": 0, "justificativa": ""}}
-  }},
-  "nota_total": 0,
-  "comentario_geral": "",
-  "sugestoes_reescrita": ["", "", ""]
-}}
-"""
-
-def avaliar_redacao(texto, tema=None):
-    prompt = build_prompt(texto, tema)
-
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            response_mime_type="application/json"
-        ),
-    )
-
     try:
-        return json.loads(response.text)
-    except:
-        return {"erro": "Falha ao interpretar JSON", "raw": response.text}
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION_GRAM,
+                response_mime_type="text/plain",
+            ),
+        )
+    except ClientError as e:
+        raise e
 
-def gerar_analise_comparativa(av_original: dict, av_corrigida: dict) -> dict:
+    return (response.text or "").strip()
+
+#  comparação
+def gerar_analise_comparativa(
+    av_original: Dict[str, Any],
+    av_corrigida: Dict[str, Any],
+) -> Dict[str, Any]:
     """
-    Compara as avaliações do texto original e do texto corrigido.
+    Compara avaliações do texto original e do texto corrigido.
     Espera que ambas tenham o formato:
     {
-      "competencias": {
-        "comp1": {"nota": int, ...},
-        ...
-      },
+      "competencias": { "comp1": {"nota": int, ...}, ... },
       "nota_total": int,
       ...
     }
     """
     comps = ["comp1", "comp2", "comp3", "comp4", "comp5"]
-    deltas_competencias = {}
+    deltas_competencias: Dict[str, Dict[str, Any]] = {}
 
     for c in comps:
         nota_orig = av_original.get("competencias", {}).get(c, {}).get("nota", 0) or 0
